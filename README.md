@@ -140,27 +140,32 @@ training:
 - 模型融合
 
 ## 使用示例
+```bash
+# 完整流程（推荐使用）：数据分析 -> 训练 -> 预测
+python main.py run-all
 
-```python
-# 示例：训练模型并生成预测
-from src.trainer import ModelTrainer
+# 或者分步运行：
 
-# 初始化训练器
-trainer = ModelTrainer('config/config.yaml')
+# 1. 首先分析数据
+python3 main.py analyze-data
 
-# 运行训练
-metrics = trainer.run_training()
+# 2. 然后训练模型
+python3 main.py train
 
-# 生成预测
-trainer.generate_submission('2014-12-19')
+# 3. 最后生成预测
+python3 main.py predict
 ```
-
 ## 测试
 
 运行单元测试：
 ```bash
 pytest tests/
 ```
+
+运行完成后，你会在 data/output 目录下找到以下文件：
+tianchi_mobile_recommendation_predict.csv：最终的预测结果文件
+data_analysis.json：数据分析结果
+model.pkl：训练好的模型
 
 ## 开发指南
 
@@ -198,7 +203,7 @@ MIT License
 
 ## 更新日志
 
-### v1.0.0 (2024-11)
+### v0.2.1 (2024-11-12)
 - 初始版本发布
 - 基本功能实现
 - 文档完善
