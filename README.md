@@ -142,7 +142,7 @@ training:
 ## 使用示例
 ```bash
 # 完整流程（推荐使用）：数据分析 -> 训练 -> 预测
-python main.py run-all
+python3 main.py run-all
 
 # 或者分步运行：
 
@@ -163,9 +163,9 @@ pytest tests/
 ```
 
 运行完成后，你会在 data/output 目录下找到以下文件：
-tianchi_mobile_recommendation_predict.csv：最终的预测结果文件
-data_analysis.json：数据分析结果
-model.pkl：训练好的模型
+- tianchi_mobile_recommendation_predict.csv：最终的预测结果文件
+- data_analysis.json：数据分析结果
+- model.pkl：训练好的模型
 
 ## 开发指南
 
