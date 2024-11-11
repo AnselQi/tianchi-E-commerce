@@ -202,7 +202,3 @@ MIT License
 - 初始版本发布
 - 基本功能实现
 - 文档完善
-
-## 致谢
-
-感谢阿里巴巴天池平台提供的数据集和竞赛机会。ansel@AnLapTop:~/project/tianchi-E-commerce/code$
