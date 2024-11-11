@@ -58,20 +58,25 @@ pip install -r requirements.txt
 
 ```bash
 # 验证配置
-python main.py validate-config
+python3 main.py validate-config
 
 # 运行数据分析
-python main.py analyze-data
+python3 main.py analyze-data
 
 # 训练模型
-python main.py train
+python3 main.py train
 
 # 生成预测
-python main.py predict
+python3 main.py predict
 
 # 或者运行完整流程
-python main.py run-all
+python3 main.py run-all
 ```
+
+运行完成后，你会在 data/output 目录下找到以下文件：
+- tianchi_mobile_recommendation_predict.csv：最终的预测结果文件
+- data_analysis.json：数据分析结果
+- model.pkl：训练好的模型
 
 ## 主要功能
 
@@ -139,33 +144,12 @@ training:
 - 参数调优
 - 模型融合
 
-## 使用示例
-```bash
-# 完整流程（推荐使用）：数据分析 -> 训练 -> 预测
-python3 main.py run-all
-
-# 或者分步运行：
-
-# 1. 首先分析数据
-python3 main.py analyze-data
-
-# 2. 然后训练模型
-python3 main.py train
-
-# 3. 最后生成预测
-python3 main.py predict
-```
 ## 测试
 
 运行单元测试：
 ```bash
 pytest tests/
 ```
-
-运行完成后，你会在 data/output 目录下找到以下文件：
-- tianchi_mobile_recommendation_predict.csv：最终的预测结果文件
-- data_analysis.json：数据分析结果
-- model.pkl：训练好的模型
 
 ## 开发指南
 
