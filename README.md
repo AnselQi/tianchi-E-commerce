@@ -13,7 +13,7 @@
 
 ## 项目结构
 
-```markdown
+```bash
 mobile_recommendation/
 │
 ├── config/
