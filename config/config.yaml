@@ -33,7 +33,7 @@ features:
 model:
   type: 'lightgbm'
   params:
-    divice: 'cpu'
+    divice: 'gpu'
     objective: 'binary'
     metric: 'auc'
     boosting_type: 'gbdt'
