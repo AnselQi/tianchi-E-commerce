@@ -43,6 +43,7 @@ mobile_recommendation/
 ├── requirements.txt          # 项目依赖
 └── main.py                  # 主程序
 ```
+```
 
 ## 环境要求
 
