@@ -1,32 +1,29 @@
 import logging
 import yaml
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Union
 import pandas as pd
 import numpy as np
-from sklearn.metrics import precision_score, recall_score, f1_score
-from datetime import datetime, timedelta
+from datetime import datetime
 from tqdm import tqdm
-from typing import Union
+import torch
+import pytorch_lightning as pl
+from torch.utils.data import DataLoader
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
+from pytorch_lightning.loggers import TensorBoardLogger
 
 from src.data_processing import DataProcessor
 from src.feature_engineering import FeatureEngineer
-from src.model import RecommendationModel
+from src.models.deep_recommender import DeepRecommender
+from src.data.dataset import RecommendationDataset
 from src.utils import setup_logging, timer
 
 logger = logging.getLogger(__name__)
 
-
 class ModelTrainer:
-    """模型训练器类"""
-
     def __init__(self, config: Union[str, dict]):
-        """
-        初始化训练器
-        Args:
-            config: 配置文件路径或配置字典
-        """
-        # 处理配置输入
+        """初始化训练器"""
+        # 处理配置
         if isinstance(config, (str, Path)):
             with open(config) as f:
                 self.config = yaml.safe_load(f)
@@ -37,20 +34,20 @@ class ModelTrainer:
 
         setup_logging(self.config['logging'])
 
-        # 初始化组件时传递配置字典
+        # 初始化组件
         self.data_processor = DataProcessor(self.config)
         self.feature_engineer = FeatureEngineer(self.config)
-        self.model = RecommendationModel(self.config)
+        self.model = DeepRecommender(self.config)
 
-        self.metrics_history = []
-    
+        # 设置设备
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # 设置随机种子
+        pl.seed_everything(self.config['system']['seed'])
+
     @timer
     def prepare_data(self) -> Tuple[pd.DataFrame, pd.DataFrame, Dict]:
-        """
-        准备数据
-        Returns:
-            处理后的用户数据、商品数据和编码器
-        """
+        """准备数据"""
         try:
             logger.info("Loading processed data...")
             user_data, item_data, encoders = self.data_processor.load_processed_data()
@@ -64,279 +61,177 @@ class ModelTrainer:
 
         return user_data, item_data, encoders
 
-    def prepare_features(self, user_data: pd.DataFrame, end_date: str) -> Dict[str, pd.DataFrame]:
-        """
-        准备特征数据
-        Args:
-            user_data: 用户行为数据
-            end_date: 结束日期
-        Returns:
-            特征字典
-        """
-        try:
-            logger.info(f"Generating features for {end_date}...")
-            features = self.feature_engineer.generate_features(user_data, end_date)
-            
-            # 验证特征不为空
-            if not features:
-                raise ValueError("No features were generated")
-            
-            # 验证特征维度
-            for feature_name, feature_df in features.items():
-                if feature_df.empty:
-                    logger.warning(f"Empty feature DataFrame for {feature_name}")
-                else:
-                    logger.info(f"Feature {feature_name} shape: {feature_df.shape}")
-            
-            return features
-            
-        except Exception as e:
-            logger.error(f"Error in prepare_features: {str(e)}")
-            raise
+    def create_datasets(self, user_data: pd.DataFrame, train_end_date: str, valid_end_date: str) -> Tuple[RecommendationDataset, RecommendationDataset]:
+        """创建训练和验证数据集"""
+        # 生成特征
+        train_features = self.feature_engineer.generate_features(user_data, train_end_date)
+        valid_features = self.feature_engineer.generate_features(user_data, valid_end_date)
 
-    def prepare_training_data(self, features: Dict[str, pd.DataFrame], labels: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
-        """
-        准备训练数据
-        Args:
-            features: 特征字典
-            labels: 标签数据
-        Returns:
-            特征矩阵和标签向量
-        """
-        try:
-            # 合并所有特征
-            all_features = []
-            for feature_df in features.values():
-                if not feature_df.empty:
-                    all_features.append(feature_df)
-            
-            if not all_features:
-                raise ValueError("No valid features available for training")
-            
-            X = pd.concat(all_features, axis=1)
-            
-            # 确保有共同的索引
-            common_index = X.index.intersection(labels.index)
-            if common_index.empty:
-                raise ValueError("No common samples between features and labels")
-            
-            X = X.loc[common_index]
-            y = labels.loc[common_index]
-            
-            logger.info(f"Prepared training data with shape: {X.shape}")
-            return X, y
-            
-        except Exception as e:
-            logger.error(f"Error in prepare_training_data: {str(e)}")
-            raise
+        # 创建数据集
+        train_dataset = RecommendationDataset(train_features, user_data, train_end_date, self.config)
+        valid_dataset = RecommendationDataset(valid_features, user_data, valid_end_date, self.config)
 
-    @timer
-    def train_and_evaluate(self, user_data: pd.DataFrame, train_end_date: str, valid_end_date: str) -> Dict[str, float]:
-        """
-        训练并评估模型
-        Args:
-            user_data: 用户行为数据
-            train_end_date: 训练集截止日期
-            valid_end_date: 验证集截止日期
-        Returns:
-            评估指标
-        """
-        try:
-            # 准备训练数据
-            logger.info("Preparing training features...")
-            train_features = self.prepare_features(user_data, train_end_date)
-            if not train_features:
-                raise ValueError("Failed to generate training features")
+        return train_dataset, valid_dataset
 
-            # 准备训练标签
-            X_train, y_train = self.model.prepare_training_data(
-                train_features, user_data, train_end_date)
-
-            # 训练模型
-            logger.info("Training model...")
-            self.model.train(X_train, y_train)
-
-            # 准备验证数据
-            logger.info("Preparing validation features...")
-            valid_features = self.prepare_features(user_data, valid_end_date)
-            if not valid_features:
-                raise ValueError("Failed to generate validation features")
-
-            # 生成推荐
-            logger.info("Generating recommendations...")
-            recommendations = self.model.generate_recommendations(valid_features)
-
-            # 评估
-            if recommendations:
-                metrics = self.model.evaluate(recommendations, user_data, valid_end_date)
-            else:
-                logger.warning("No recommendations generated")
-                metrics = {
-                    'precision': 0,
-                    'recall': 0,
-                    'f1': 0,
-                    'coverage': 0
-                }
-
-            return metrics
-
-        except Exception as e:
-            logger.error(f"Error in train_and_evaluate: {str(e)}")
-            raise
-
-    def evaluate_recommendations(self,
-                                 recommendations: List[Tuple[int, int, float]],
-                                 user_data: pd.DataFrame,
-                                 eval_date: str) -> Dict[str, float]:
-        """
-        评估推荐结果
-        Args:
-            recommendations: 推荐列表
-            user_data: 用户行为数据
-            eval_date: 评估日期
-        Returns:
-            评估指标
-        """
-        eval_date = pd.to_datetime(eval_date)
-        actual_purchases = set(
-            user_data[
-                (user_data['time'].dt.date == eval_date.date()) &
-                (user_data['behavior_type'] == 4)
-            ][['user_id_encoded', 'item_id_encoded']].itertuples(index=False)
+    def create_dataloaders(self, train_dataset: RecommendationDataset, valid_dataset: RecommendationDataset) -> Tuple[DataLoader, DataLoader]:
+        """创建数据加载器"""
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=self.config['model']['training']['batch_size'],
+            shuffle=True,
+            num_workers=self.config['data']['num_workers'],
+            pin_memory=self.config['data']['pin_memory']
         )
 
-        pred_purchases = set((user, item) for user, item, _ in recommendations)
+        valid_loader = DataLoader(
+            valid_dataset,
+            batch_size=self.config['model']['training']['batch_size'],
+            shuffle=False,
+            num_workers=self.config['data']['num_workers'],
+            pin_memory=self.config['data']['pin_memory']
+        )
 
-        # 计算评估指标
-        try:
-            precision = len(pred_purchases & actual_purchases) / \
-                len(pred_purchases)
-        except ZeroDivisionError:
-            precision = 0
+        return train_loader, valid_loader
 
-        try:
-            recall = len(pred_purchases & actual_purchases) / \
-                len(actual_purchases)
-        except ZeroDivisionError:
-            recall = 0
+    def setup_training(self) -> Tuple[pl.Trainer, List]:
+        """设置训练器和回调"""
+        # 设置检查点回调
+        checkpoint_callback = ModelCheckpoint(
+            monitor='val_loss',
+            dirpath=self.config['data']['paths']['checkpoint_dir'],
+            filename='model-{epoch:02d}-{val_loss:.2f}',
+            save_top_k=3,
+            mode='min'
+        )
 
-        try:
-            f1 = 2 * precision * recall / (precision + recall)
-        except ZeroDivisionError:
-            f1 = 0
+        # 设置早停回调
+        early_stopping = EarlyStopping(
+            monitor='val_loss',
+            patience=self.config['model']['training']['early_stopping']['patience'],
+            min_delta=self.config['model']['training']['early_stopping']['min_delta'],
+            mode='min'
+        )
 
-        metrics = {
-            'precision': precision,
-            'recall': recall,
-            'f1': f1
-        }
+        # 设置TensorBoard日志
+        logger = TensorBoardLogger(
+            save_dir=self.config['data']['paths']['log_dir'],
+            name='lightning_logs'
+        )
 
-        logger.info(f"Evaluation metrics: {metrics}")
-        return metrics
+        # 创建训练器
+        trainer = pl.Trainer(
+            max_epochs=self.config['model']['training']['num_epochs'],
+            accelerator=self.config['device']['accelerator'],
+            devices=self.config['device']['devices'],
+            strategy=self.config['device']['strategy'],
+            precision=self.config['device']['precision'],
+            callbacks=[checkpoint_callback, early_stopping],
+            logger=logger,
+            log_every_n_steps=50
+        )
+
+        return trainer, [checkpoint_callback, early_stopping]
 
     @timer
-    def run_training(self):
-        """运行完整的训练流程"""
+    def train(self, train_dataset: RecommendationDataset, valid_dataset: RecommendationDataset) -> Dict[str, float]:
+        """训练模型"""
+        # 创建数据加载器
+        train_loader, valid_loader = self.create_dataloaders(train_dataset, valid_dataset)
+
+        # 设置训练器
+        trainer, callbacks = self.setup_training()
+
+        # 训练模型
+        trainer.fit(
+            self.model,
+            train_loader,
+            valid_loader
+        )
+
+        # 获取最佳模型
+        best_model_path = callbacks[0].best_model_path
+        self.model = DeepRecommender.load_from_checkpoint(best_model_path)
+
+        # 返回最佳指标
+        return {
+            'best_val_loss': callbacks[0].best_model_score.item(),
+            'best_epoch': callbacks[0].best_epoch
+        }
+
+    def predict(self, test_dataset: RecommendationDataset) -> List[Tuple]:
+        """生成预测"""
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=self.config['model']['training']['batch_size'],
+            shuffle=False,
+            num_workers=self.config['data']['num_workers']
+        )
+
+        return self.model.generate_recommendations(test_loader)
+
+    @timer
+    def run_training(self) -> Dict[str, float]:
+        """运行完整训练流程"""
         # 准备数据
         user_data, item_data, encoders = self.prepare_data()
 
-        # 设置时间范围
-        train_end_date = self.config['training']['train_end_date']
-        valid_end_date = self.config['training']['pred_date']
-
-        # 训练并评估模型
-        metrics = self.train_and_evaluate(
+        # 创建数据集
+        train_dataset, valid_dataset = self.create_datasets(
             user_data,
-            train_end_date,
-            valid_end_date
+            self.config['training']['train_end_date'],
+            self.config['training']['pred_date']
         )
 
-        # 保存模型和特征重要性
+        # 训练模型
+        metrics = self.train(train_dataset, valid_dataset)
+
+        # 保存模型
         self.save_model_artifacts()
 
         return metrics
 
     def save_model_artifacts(self):
         """保存模型相关文件"""
-        output_dir = Path(self.config['data']['output_dir'])
+        output_dir = Path(self.config['data']['paths']['output_dir'])
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # 保存模型
-        self.model.save_model(output_dir / 'model.pkl')
+        self.model.save_model(output_dir / 'model.pt')
 
-        # 保存特征重要性
-        pd.DataFrame({
-            'feature': self.model.feature_importance.index,
-            'importance': self.model.feature_importance.values
-        }).to_csv(output_dir / 'feature_importance.csv', index=False)
-
-        # 保存训练历史
-        pd.DataFrame(self.metrics_history).to_csv(
-            output_dir / 'training_history.csv',
-            index=False
-        )
+        # 保存配置
+        with open(output_dir / 'config.yaml', 'w') as f:
+            yaml.dump(self.config, f)
 
         logger.info(f"Saved model artifacts to {output_dir}")
 
     def generate_submission(self, test_date: str):
-        """
-        生成预测提交文件
-        Args:
-            test_date: 预测日期
-        """
-        logger.info(f"Generating predictions for {test_date}")
-    
-        try:
-            # 准备数据
-            user_data, item_data, encoders = self.prepare_data()
-        
-            # 准备特征
-            test_features = self.prepare_features(user_data, test_date)
-            if not test_features:
-                raise ValueError("Failed to generate test features")
-            
-            # 生成推荐
-            recommendations = self.model.generate_recommendations(test_features)
-            if not recommendations:
-                raise ValueError("No recommendations generated")
-            
-            # 转换回原始ID
-            submission = []
-            for user_encoded, item_encoded, _ in recommendations:
-                try:
-                    user_id = encoders['user_id'].inverse_transform([user_encoded])[0]
-                    item_id = encoders['item_id'].inverse_transform([item_encoded])[0]
-                    # 转换为字符串类型
-                    submission.append((str(user_id), str(item_id)))
-                except Exception as e:
-                    logger.warning(f"Error converting IDs: {e}")
-                    continue
-        
-            # 创建DataFrame并去重
-            submission_df = pd.DataFrame(
-                submission,
-                columns=['user_id', 'item_id']
-            ).drop_duplicates()
-        
-            # 保存为CSV文件
-            output_path = Path(self.config['data']['output_dir']) / 'tianchi_mobile_recommendation_predict.csv'
-            submission_df.to_csv(output_path, index=False, encoding='utf-8')
-        
-            logger.info(f"Generated submission file with {len(submission_df)} predictions")
-            logger.info(f"Submission file saved to: {output_path}")
-        
-            # 输出一些统计信息
-            logger.info(f"Number of unique users: {submission_df['user_id'].nunique()}")
-            logger.info(f"Number of unique items: {submission_df['item_id'].nunique()}")
-        
-        except Exception as e:
-            logger.error(f"Error generating submission: {str(e)}")
-            raise
+        """生成提交文件"""
+        # 准备数据
+        user_data, item_data, encoders = self.prepare_data()
+
+        # 创建测试数据集
+        test_features = self.feature_engineer.generate_features(user_data, test_date)
+        test_dataset = RecommendationDataset(test_features, user_data, test_date, self.config)
+
+        # 生成预测
+        recommendations = self.predict(test_dataset)
+
+        # 转换ID并保存
+        submission = []
+        for user_encoded, item_encoded, _ in recommendations:
+            user_id = encoders['user_id'].inverse_transform([user_encoded])[0]
+            item_id = encoders['item_id'].inverse_transform([item_encoded])[0]
+            submission.append((str(user_id), str(item_id)))
+
+        # 保存提交文件
+        submission_df = pd.DataFrame(submission, columns=['user_id', 'item_id'])
+        output_path = Path(self.config['data']['paths']['output_dir']) / 'submission.csv'
+        submission_df.to_csv(output_path, index=False)
+
+        logger.info(f"Generated submission file with {len(submission_df)} recommendations")
 
 if __name__ == "__main__":
     # 运行训练流程
     trainer = ModelTrainer('config/config.yaml')
     metrics = trainer.run_training()
-
-    # 生成提交文件
     trainer.generate_submission('2024-11-14')
