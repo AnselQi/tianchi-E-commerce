@@ -1,6 +1,15 @@
-# tianchi-E-commerce
-移动推荐算法，以阿里巴巴移动电商平台的真实用户-商品行为数据为基础，同时提供移动时代特有的位置信息，希望你能够挖掘数据背后丰富的内涵，为移动用户在合适的时间、合适的地点精准推荐合适的内容
-基于阿里巴巴移动电商平台的用户行为数据构建的推荐系统，针对天池竞赛"移动推荐算法"设计。本项目实现了完整的推荐系统流程，包括数据处理、特征工程、模型训练和预测。
+```markdown
+# 移动电商深度推荐系统
+
+基于阿里巴巴移动电商平台的用户行为数据构建的深度学习推荐系统，针对天池竞赛"移动推荐算法"设计。采用深度学习模型对用户行为序列建模，实现个性化推荐。
+
+## 项目特点
+
+- 深度学习模型架构（多塔模型 + Transformer序列编码）
+- GPU加速训练支持
+- 完整的数据处理和特征工程流程
+- PyTorch Lightning框架实现
+- 丰富的评估和可视化工具
 
 ## 项目结构
 
@@ -13,59 +22,60 @@ mobile_recommendation/
 ├── data/
 │   ├── raw/                  # 原始数据
 │   ├── processed/            # 处理后的数据
+│   ├── checkpoints/          # 模型检查点
 │   └── output/               # 输出结果
 │
 ├── src/
 │   ├── __init__.py
-│   ├── data_processing.py    # 数据处理模块
-│   ├── feature_engineering.py # 特征工程模块
-│   ├── model.py              # 模型定义
-│   ├── trainer.py            # 训练模块
+│   ├── data/
+│   │   ├── __init__.py
+│   │   ├── dataset.py        # 数据集类
+│   │   └── dataloader.py     # 数据加载器
+│   ├── models/
+│   │   ├── __init__.py
+│   │   ├── deep_recommender.py  # 深度推荐模型
+│   │   └── layers.py           # 模型层定义
+│   ├── data_processing.py    # 数据处理
+│   ├── feature_engineering.py # 特征工程
+│   ├── trainer.py            # 训练管理
 │   └── utils.py             # 工具函数
 │
-├── notebooks/                # Jupyter notebooks
-├── tests/                    # 单元测试
 ├── requirements.txt          # 项目依赖
-└── main.py                   # 主程序
+└── main.py                  # 主程序
 ```
 
 ## 环境要求
 
 - Python 3.8+
-- 依赖包：见 requirements.txt
+- CUDA 11.0+ (GPU训练)
+- 依赖包：
+  ```
+  torch>=1.9.0
+  pytorch-lightning>=1.5.0
+  numpy>=1.20.0
+  pandas>=1.3.0
+  scikit-learn>=0.24.0
+  ```
 
 ## 快速开始
 
 ### 1. 环境配置
 
 ```bash
-# 下载最新版 Anaconda 安装脚本
-wget https://repo.anaconda.com/archive/Anaconda3-2024.02-1-Linux-x86_64.sh
+# 创建Conda环境
+conda create -n tianchi-deep python=3.9
+conda activate tianchi-deep
 
-# 添加执行权限
-chmod +x Anaconda3-2024.02-1-Linux-x86_64.sh
+# 安装PyTorch (GPU版本)
+conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
 
-# 运行安装脚本
-bash Anaconda3-2024.02-1-Linux-x86_64.sh
-
-# 重新加载 bash 配置
-source ~/.bashrc
-
-# 验证安装
-conda --version
-
-# 创建虚拟环境
-conda create -n tianchi python=3.9 numpy=1.24.3 pandas=2.0.3
-
-conda activate tianchi
-
-# 安装依赖
+# 安装其他依赖
 pip install -r requirements.txt
 ```
 
 ### 2. 数据准备
 
-将原始数据文件放置在 `data/raw/` 目录下：
+将数据文件放入 `data/raw/` 目录：
 - tianchi_fresh_comp_train_user_2w.csv
 - tianchi_fresh_comp_train_item_2w.csv
 
@@ -75,134 +85,130 @@ pip install -r requirements.txt
 # 验证配置
 python3 main.py validate-config
 
-# 运行数据分析
+# 数据分析
 python3 main.py analyze-data
 
-# 训练模型
-python3 main.py train
+# 训练模型（使用GPU）
+python3 main.py train --gpu
 
 # 生成预测
 python3 main.py predict
 
-# 或者运行完整流程
-python3 main.py run-all
+# 运行完整流程
+python3 main.py run-all --gpu
 ```
 
-运行完成后，你会在 data/output 目录下找到以下文件：
-- tianchi_mobile_recommendation_predict.csv：最终的预测结果文件
-- data_analysis.json：数据分析结果
-- model.pkl：训练好的模型
+## 模型架构
 
-## 主要功能
+### 多塔结构
+1. 用户塔
+   - 用户基础特征编码
+   - 行为序列编码
+   - 多层感知机
 
-### 数据处理
-- 数据清洗和预处理
-- 类别特征编码
-- 时间特征处理
-- 缺失值处理
+2. 商品塔
+   - 商品特征编码
+   - 类别嵌入
+   - 多层感知机
 
-### 特征工程
-- 用户行为特征
-  - 各类行为计数
-  - 类别偏好
-  - 时间模式
-- 商品特征
-  - 被交互次数
-  - 转化率
-  - 类别分布
-- 用户-商品交叉特征
-  - 交互历史
-  - 时间序列特征
+3. 序列编码器
+   - Transformer编码器
+   - 自注意力机制
+   - 位置编码
 
-### 模型
-- 基于LightGBM的推荐模型
-- 支持多时间窗口的特征
-- 批量预测支持
-- 模型评估和验证
+### 特征处理
+- 类别特征嵌入
+- 数值特征标准化
+- 序列特征处理
+- 时间特征编码
 
-### 评估指标
-- 精确率 (Precision)
-- 召回率 (Recall)
-- F1分数
-
-## 配置说明
-
-配置文件 `config/config.yaml` 包含以下主要部分：
-
-```yaml
-data:
-  raw_user_data: 数据路径配置
-  ...
-
-features:
-  time_windows: 特征时间窗口设置
-  ...
-
-model:
-  params: 模型参数设置
-  ...
-
-training:
-  train_dates: 训练日期设置
-  ...
-```
+### 训练策略
+- AdamW优化器
+- 余弦退火学习率
+- 混合精度训练
+- 梯度裁剪
 
 ## 性能优化
 
-1. 数据处理优化
-- 特征缓存机制
-- 内存使用优化
-- 批处理支持
+1. 计算优化
+   - GPU加速
+   - 混合精度训练
+   - 数据预取
 
-2. 模型优化
-- 特征选择
-- 参数调优
-- 模型融合
+2. 内存优化
+   - 渐进式加载
+   - 特征缓存
+   - 内存监控
 
-## 测试
+3. 训练优化
+   - 分布式训练
+   - 梯度累积
+   - 检查点保存
 
-运行单元测试：
-```bash
-pytest tests/
-```
+## 评估指标
+
+- 精确率(Precision)
+- 召回率(Recall)
+- F1分数
+
+## 可视化分析
+
+- TensorBoard支持
+- 训练过程可视化
+- 嵌入空间可视化
+- 注意力权重可视化
 
 ## 开发指南
 
-代码风格
+1. 代码风格
+   - 遵循PEP 8
+   - 类型注解
+   - 文档字符串
 
-- 遵循PEP 8规范
-
-- 使用类型注解
-
-- 添加详细的文档字符串
+2. 测试
+   ```bash
+   # 运行单元测试
+   pytest tests/
+   
+   # 运行特定测试
+   pytest tests/test_model.py -v
+   ```
 
 ## 常见问题
 
-1. 内存不足
-   - 减小 batch_size
-   - 使用 reduce_memory_usage 优化
-   - 启用特征缓存
-  
-2. 训练速度慢
-   - 调整特征窗口大小
-   - 减少特征数量
-   - 使用增量训练
+1. CUDA内存不足
+   - 减小batch_size
+   - 启用混合精度训练
+   - 使用梯度累积
 
-## 许可证
-
-MIT License
+2. 训练不稳定
+   - 调整学习率
+   - 使用梯度裁剪
+   - 检查数据预处理
 
 ## 作者
 
 綦子宽
 
-## 参考
-
-- 竞赛链接：[天池移动推荐算法](https://tianchi.aliyun.com/competition/entrance/231522/information)
-
 ## 更新日志
 
 ### v0.2.1 (2024-11-12)
+- 迁移到深度学习架构
+- 添加GPU训练支持
+- 优化特征处理流程
+- 增加可视化功能
+
+### v0.1.0 (2024-11-10)
 - 初始版本发布
 - 基本功能实现
-- 文档完善
+
+## 参考
+
+- [天池移动推荐算法](https://tianchi.aliyun.com/competition/entrance/231522/information)
+- [PyTorch文档](https://pytorch.org/docs/stable/index.html)
+- [PyTorch Lightning文档](https://pytorch-lightning.readthedocs.io/)
+
+## 许可证
+
+MIT License
+```
