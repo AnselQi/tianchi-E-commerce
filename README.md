@@ -11,7 +11,7 @@
 - 丰富的评估和可视化工具
 
 ## 项目结构
-
+```
 mobile_recommendation/
 │
 ├── config/
