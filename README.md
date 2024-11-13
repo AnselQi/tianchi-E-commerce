@@ -1,4 +1,3 @@
-
 # tianchi-E-commerce
 移动推荐算法，以阿里巴巴移动电商平台的真实用户-商品行为数据为基础，同时提供移动时代特有的位置信息，希望你能够挖掘数据背后丰富的内涵，为移动用户在合适的时间、合适的地点精准推荐合适的内容
 基于阿里巴巴移动电商平台的用户行为数据构建的推荐系统，针对天池竞赛"移动推荐算法"设计。本项目实现了完整的推荐系统流程，包括数据处理、特征工程、模型训练和预测。
@@ -40,6 +39,21 @@ mobile_recommendation/
 ### 1. 环境配置
 
 ```bash
+# 下载最新版 Anaconda 安装脚本
+wget https://repo.anaconda.com/archive/Anaconda3-2024.02-1-Linux-x86_64.sh
+
+# 添加执行权限
+chmod +x Anaconda3-2024.02-1-Linux-x86_64.sh
+
+# 运行安装脚本
+bash Anaconda3-2024.02-1-Linux-x86_64.sh
+
+# 重新加载 bash 配置
+source ~/.bashrc
+
+# 验证安装
+conda --version
+
 # 创建虚拟环境
 conda create -n tianchi python=3.9 numpy=1.24.3 pandas=2.0.3
 
@@ -168,7 +182,7 @@ pytest tests/
    - 减小 batch_size
    - 使用 reduce_memory_usage 优化
    - 启用特征缓存
-
+  
 2. 训练速度慢
    - 调整特征窗口大小
    - 减少特征数量
