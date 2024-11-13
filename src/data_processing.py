@@ -1,3 +1,4 @@
+import gc
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -8,6 +9,7 @@ import logging
 from src.utils import setup_logging
 import torch
 from torch.utils.data import random_split
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -15,12 +17,8 @@ class DataProcessor:
     """数据处理类"""
 
     def __init__(self, config: Union[str, dict]):
-        """
-        初始化数据处理器
-        Args:
-            config: 配置文件路径或配置字典
-        """
-        # 处理配置输入
+        """初始化数据处理器"""
+        # 处理配置
         if isinstance(config, (str, Path)):
             with open(config) as f:
                 self.config = yaml.safe_load(f)
@@ -31,26 +29,30 @@ class DataProcessor:
 
         setup_logging(self.config['logging'])
 
-        # 编码器和标准化器
-        self.encoders = {
-            'user_id': LabelEncoder(),
-            'item_id': LabelEncoder(),
-            'category': LabelEncoder(),
-            'user_geohash': LabelEncoder(),
-            'item_geohash': LabelEncoder()
-        }
-        
+        # 初始化编码器
+        self.encoders = {}
+        for feature in self.config['data']['features']['categorical']:
+            self.encoders[feature] = LabelEncoder()
+    
+        # 初始化标准化器
         self.scalers = {
             'numerical_features': StandardScaler()
-        }
+        }   
+
 
     def load_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """加载原始数据"""
         logger.info("Loading raw data...")
 
+        # Load user data
         user_data = pd.read_csv(self.config['data']['paths']['raw_user_data'])
+        # Convert time column to datetime
+        user_data['time'] = pd.to_datetime(user_data['time'], format='%Y-%m-%d %H')
+    
+        # Load item data
         item_data = pd.read_csv(self.config['data']['paths']['raw_item_data'])
 
+        # Rename category columns if needed
         if 'item_category' in user_data.columns:
             user_data = user_data.rename(columns={'item_category': 'category'})
         if 'item_category' in item_data.columns:
@@ -62,42 +64,111 @@ class DataProcessor:
     def preprocess_data(self, user_data: pd.DataFrame, item_data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """数据预处理"""
         logger.info("Preprocessing data...")
-
         try:
+            # 首先对所有分类特征进行 fit
+            categorical_features = self.config['data']['features']['categorical']
+            for feature in categorical_features:
+                if feature not in self.encoders:
+                    self.encoders[feature] = LabelEncoder()
+                if feature in user_data.columns:
+                    self.encoders[feature].fit(user_data[feature].astype(str))
+                if feature in item_data.columns and not hasattr(self.encoders[feature], 'classes_'):
+                    self.encoders[feature].fit(item_data[feature].astype(str))
+        
             # 时间处理
             user_data['time'] = pd.to_datetime(user_data['time'])
             user_data['hour'] = user_data['time'].dt.hour
             user_data['day'] = user_data['time'].dt.day
             user_data['weekday'] = user_data['time'].dt.weekday
-
+        
+            # 生成序列特征
+            max_seq_length = self.config['data']['features']['sequence']['max_length']
+            logger.info("Generating sequence features...")
+        
+            # 按用户和时间排序
+            user_data = user_data.sort_values(['user_id', 'time'])
+        
+            # 对每个用户生成序列
+            sequences = user_data.groupby('user_id').agg({
+                'item_id': lambda x: list(x)[-max_seq_length:],
+                'behavior_type': lambda x: list(x)[-max_seq_length:],
+                'category': lambda x: list(x)[-max_seq_length:]
+            }).reset_index()
+        
+            # 编码序列中的特征
+            sequences['item_sequence'] = sequences['item_id'].apply(
+                lambda x: [self.encoders['item_id'].transform([str(i)])[0] for i in x] + 
+                         [0] * (max_seq_length - len(x))
+            )
+            sequences['behavior_sequence'] = sequences['behavior_type'].apply(
+                lambda x: x + [0] * (max_seq_length - len(x))
+            )
+            sequences['category_sequence'] = sequences['category'].apply(
+                lambda x: [self.encoders['category'].transform([str(i)])[0] for i in x] + 
+                     [0] * (max_seq_length - len(x))
+            )
+        
+            # 添加序列长度
+            sequences['sequence_length'] = sequences['item_id'].apply(len)
+        
+            # 合并序列特征回原始数据
+            user_data = pd.merge(
+                user_data,
+                sequences[['user_id', 'item_sequence', 'behavior_sequence', 
+                      'category_sequence', 'sequence_length']],
+                on='user_id',
+                how='left'
+            )
+        
             # 编码分类特征
-            categorical_features = self.config['data']['features']['categorical']
             for feature in categorical_features:
                 if feature in user_data.columns:
-                    user_data[f'{feature}_encoded'] = self.encoders[feature].fit_transform(user_data[feature])
+                    user_data[f'{feature}_encoded'] = self.encoders[feature].transform(
+                        user_data[feature].astype(str)
+                    )
                 if feature in item_data.columns:
-                    if hasattr(self.encoders[feature], 'classes_'):
-                        item_data[f'{feature}_encoded'] = self.encoders[feature].transform(item_data[feature])
-                    else:
-                        item_data[f'{feature}_encoded'] = self.encoders[feature].fit_transform(item_data[feature])
-
-            # 处理缺失值
-            user_data['user_geohash'] = user_data['user_geohash'].fillna('unknown')
-            item_data['item_geohash'] = item_data['item_geohash'].fillna('unknown')
-
-            # 生成序列特征
-            user_data = self.generate_sequence_features(user_data)
-
-            # 标准化数值特征
-            numerical_features = ['hour', 'day', 'weekday']
-            user_data[numerical_features] = self.scalers['numerical_features'].fit_transform(user_data[numerical_features])
-
+                    item_data[f'{feature}_encoded'] = self.encoders[feature].transform(
+                        item_data[feature].astype(str)
+                    )
+        
             logger.info("Data preprocessing completed")
             return user_data, item_data
-
+        
         except Exception as e:
             logger.error(f"Error during preprocessing: {str(e)}")
             raise
+
+    def create_feature_dict(self, user_data: pd.DataFrame, item_data: pd.DataFrame) -> Dict:
+        """创建特征字典"""
+        return {
+            'user_features': {
+                'categorical': {
+                    feat: torch.tensor(user_data[f'{feat}_encoded'].values)
+                    for feat in self.config['data']['features']['user']['categorical']
+                },
+                'numerical': torch.tensor(
+                    user_data[self.config['data']['features']['user']['numerical']].values
+                )
+            },
+            'item_features': {
+                'categorical': {
+                    feat: torch.tensor(item_data[f'{feat}_encoded'].values)
+                    for feat in self.config['data']['features']['item']['categorical']
+                },
+                'numerical': torch.tensor(
+                    item_data[self.config['data']['features']['item']['numerical']].values
+                )if self.config['data']['features']['item']['numerical'] else torch.tensor([])
+            },
+            'sequence_features': {
+                'items': torch.tensor(user_data['item_sequence'].tolist()),
+                'behaviors': torch.tensor(user_data['behavior_sequence'].tolist()),
+                'categories': torch.tensor(user_data['category_sequence'].tolist()),
+                'lengths': torch.tensor(user_data['sequence_length'].values)
+            },
+            'labels': torch.tensor(
+                (user_data['behavior_type'] == 4).astype(float).values
+            )
+        }
 
     def generate_sequence_features(self, user_data: pd.DataFrame) -> pd.DataFrame:
         """生成序列特征"""
@@ -143,24 +214,18 @@ class DataProcessor:
 
     def create_feature_dict(self, user_data: pd.DataFrame, item_data: pd.DataFrame) -> Dict:
         """创建特征字典"""
-        return {
+        feature_dict = {
             'user_features': {
                 'categorical': {
                     feat: torch.tensor(user_data[f'{feat}_encoded'].values)
                     for feat in self.config['data']['features']['user']['categorical']
-                },
-                'numerical': torch.tensor(
-                    user_data[self.config['data']['features']['user']['numerical']].values
-                )
+                }
             },
             'item_features': {
                 'categorical': {
                     feat: torch.tensor(item_data[f'{feat}_encoded'].values)
                     for feat in self.config['data']['features']['item']['categorical']
-                },
-                'numerical': torch.tensor(
-                    item_data[self.config['data']['features']['item']['numerical']].values
-                )
+                }
             },
             'sequence_features': {
                 'items': torch.tensor(user_data['item_sequence'].tolist()),
@@ -171,6 +236,25 @@ class DataProcessor:
                 (user_data['behavior_type'] == 4).astype(float).values
             )
         }
+
+        # Add numerical features if they exist
+        user_numerical = self.config['data']['features']['user']['numerical']
+        if user_numerical:
+            feature_dict['user_features']['numerical'] = torch.tensor(
+                user_data[user_numerical].values
+            )
+        else:
+            feature_dict['user_features']['numerical'] = torch.tensor([])
+
+        item_numerical = self.config['data']['features']['item']['numerical']
+        if item_numerical:
+            feature_dict['item_features']['numerical'] = torch.tensor(
+                item_data[item_numerical].values
+            )
+        else:
+            feature_dict['item_features']['numerical'] = torch.tensor([])
+
+        return feature_dict
 
     def prepare_test_data(self, test_date: str = None) -> Dict:
         """准备测试数据"""

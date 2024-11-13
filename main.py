@@ -9,13 +9,17 @@ import os
 import pandas as pd 
 import torch
 import pytorch_lightning as pl
+import warnings
 
-from src.trainer import DeepModelTrainer
+warnings.filterwarnings('ignore', category=FutureWarning, module='transformers.utils.generic')
+
+from src.trainer import ModelTrainer
 from src.utils import setup_logging, timer
 from src.data_processing import DataProcessor
 from src.data.dataset import RecommendationDataset
 from src.models.deep_recommender import DeepRecommender
 
+warnings.filterwarnings('ignore', message='.*_register_pytree_node.*')
 warnings.filterwarnings('ignore', category=UserWarning)
 logger = logging.getLogger(__name__)
 

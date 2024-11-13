@@ -1,29 +1,43 @@
 import logging
-import yaml
-from pathlib import Path
-from typing import Dict, List, Tuple, Union
-import pandas as pd
-import numpy as np
-from datetime import datetime
-from tqdm import tqdm
 import torch
 import pytorch_lightning as pl
-from torch.utils.data import DataLoader
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger
+from typing import Dict, List, Tuple, Union
+import numpy as np
+from pathlib import Path
+import yaml
+import gc
+import psutil
+import os
+from tqdm import tqdm
+import functools
+from torch.utils.data import DataLoader
 
-from src.data_processing import DataProcessor
-from src.feature_engineering import FeatureEngineer
-from src.models.deep_recommender import DeepRecommender
 from src.data.dataset import RecommendationDataset
+from src.data_processing import DataProcessor
+from src.models.deep_recommender import DeepRecommender
 from src.utils import setup_logging, timer
-
 logger = logging.getLogger(__name__)
+
+# 首先定义装饰器
+def memory_optimize(func):
+    """内存优化装饰器"""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        gc.collect()
+        torch.cuda.empty_cache()
+        try:
+            result = func(*args, **kwargs)
+            return result
+        finally:
+            gc.collect()
+            torch.cuda.empty_cache()
+    return wrapper
 
 class ModelTrainer:
     def __init__(self, config: Union[str, dict]):
         """初始化训练器"""
-        # 处理配置
         if isinstance(config, (str, Path)):
             with open(config) as f:
                 self.config = yaml.safe_load(f)
@@ -33,205 +47,143 @@ class ModelTrainer:
             raise TypeError("config must be either a path (str) or a dictionary")
 
         setup_logging(self.config['logging'])
-
-        # 初始化组件
+        self.check_gpu_and_optimize()
         self.data_processor = DataProcessor(self.config)
-        self.feature_engineer = FeatureEngineer(self.config)
         self.model = DeepRecommender(self.config)
 
-        # 设置设备
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    def monitor_memory_usage(self):
+        """监控内存使用情况"""
+        process = psutil.Process(os.getpid())
+        memory_info = process.memory_info()
         
-        # 设置随机种子
-        pl.seed_everything(self.config['system']['seed'])
+        logger.info(f"Memory Usage: {memory_info.rss / 1024 / 1024 / 1024:.2f}GB")
+        logger.info(f"Virtual Memory: {memory_info.vms / 1024 / 1024 / 1024:.2f}GB")
+        if torch.cuda.is_available():
+            logger.info(f"GPU Memory Allocated: {torch.cuda.memory_allocated()/1024**3:.2f}GB")
+            logger.info(f"GPU Memory Reserved: {torch.cuda.memory_reserved()/1024**3:.2f}GB")
 
-    @timer
-    def prepare_data(self) -> Tuple[pd.DataFrame, pd.DataFrame, Dict]:
-        """准备数据"""
-        try:
-            logger.info("Loading processed data...")
-            user_data, item_data, encoders = self.data_processor.load_processed_data()
-        except FileNotFoundError:
-            logger.info("Processed data not found, processing raw data...")
-            user_data, item_data = self.data_processor.load_data()
-            user_data, item_data = self.data_processor.preprocess_data(
-                user_data, item_data)
-            self.data_processor.save_processed_data(user_data, item_data)
-            _, _, encoders = self.data_processor.load_processed_data()
+    def check_gpu_and_optimize(self):
+        """检查 GPU 并进行优化设置"""
+        if not torch.cuda.is_available():
+            raise RuntimeError("No GPU available!")
+        
+        gpu_name = torch.cuda.get_device_name(0)
+        if 'A100' not in gpu_name:
+            logger.warning(f"Expected NVIDIA A100, but found {gpu_name}")
+        
+        gpu_props = torch.cuda.get_device_properties(0)
+        total_memory = gpu_props.total_memory / 1024**3
+        
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        
+        torch.cuda.set_per_process_memory_fraction(0.95)
+        
+        logger.info(f"Using GPU: {gpu_name} with {total_memory:.2f}GB memory")
+        return total_memory
 
-        return user_data, item_data, encoders
-
-    def create_datasets(self, user_data: pd.DataFrame, train_end_date: str, valid_end_date: str) -> Tuple[RecommendationDataset, RecommendationDataset]:
-        """创建训练和验证数据集"""
-        # 生成特征
-        train_features = self.feature_engineer.generate_features(user_data, train_end_date)
-        valid_features = self.feature_engineer.generate_features(user_data, valid_end_date)
-
-        # 创建数据集
-        train_dataset = RecommendationDataset(train_features, user_data, train_end_date, self.config)
-        valid_dataset = RecommendationDataset(valid_features, user_data, valid_end_date, self.config)
-
-        return train_dataset, valid_dataset
+    def setup_training(self) -> Tuple[pl.Trainer, List]:
+        """设置训练器"""
+        gpu_memory = self.check_gpu_and_optimize()
+        
+        if hasattr(self, 'dynamic_batch_size'):
+            batch_size = self.calculate_optimal_batch_size(gpu_memory)
+            self.config['model']['training']['batch_size'] = batch_size
+            logger.info(f"Dynamically set batch size to: {batch_size}")
+        
+        trainer = pl.Trainer(
+            accelerator='gpu',
+            devices=[0],
+            precision=16,
+            strategy='auto',
+            callbacks=[
+                ModelCheckpoint(
+                    dirpath=self.config['data']['paths']['checkpoint_dir'],
+                    filename='model-{epoch:02d}-{val_loss:.2f}',
+                    save_top_k=3,
+                    mode='min'
+                ),
+                EarlyStopping(
+                    monitor='val_loss',
+                    patience=self.config['model']['training']['early_stopping']['patience'],
+                    mode='min'
+                )
+            ],
+            logger=TensorBoardLogger(
+                save_dir=self.config['data']['paths']['log_dir'],
+                name='lightning_logs'
+            ),
+            gradient_clip_val=1.0,
+            log_every_n_steps=50,
+            max_epochs=self.config['model']['training']['num_epochs']
+        )
+        
+        return trainer
 
     def create_dataloaders(self, train_dataset: RecommendationDataset, valid_dataset: RecommendationDataset) -> Tuple[DataLoader, DataLoader]:
-        """创建数据加载器"""
+        """创建优化的数据加载器"""
         train_loader = DataLoader(
             train_dataset,
             batch_size=self.config['model']['training']['batch_size'],
             shuffle=True,
-            num_workers=self.config['data']['num_workers'],
-            pin_memory=self.config['data']['pin_memory']
+            num_workers=self.config['system']['num_workers'],
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=self.config['system']['prefetch_factor'],
+            drop_last=True,
+            generator=torch.Generator(device='cuda')
         )
 
         valid_loader = DataLoader(
             valid_dataset,
             batch_size=self.config['model']['training']['batch_size'],
             shuffle=False,
-            num_workers=self.config['data']['num_workers'],
-            pin_memory=self.config['data']['pin_memory']
+            num_workers=max(1, self.config['system']['num_workers'] // 2),
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=2
         )
 
         return train_loader, valid_loader
 
-    def setup_training(self) -> Tuple[pl.Trainer, List]:
-        """设置训练器和回调"""
-        # 设置检查点回调
-        checkpoint_callback = ModelCheckpoint(
-            monitor='val_loss',
-            dirpath=self.config['data']['paths']['checkpoint_dir'],
-            filename='model-{epoch:02d}-{val_loss:.2f}',
-            save_top_k=3,
-            mode='min'
-        )
-
-        # 设置早停回调
-        early_stopping = EarlyStopping(
-            monitor='val_loss',
-            patience=self.config['model']['training']['early_stopping']['patience'],
-            min_delta=self.config['model']['training']['early_stopping']['min_delta'],
-            mode='min'
-        )
-
-        # 设置TensorBoard日志
-        logger = TensorBoardLogger(
-            save_dir=self.config['data']['paths']['log_dir'],
-            name='lightning_logs'
-        )
-
-        # 创建训练器
-        trainer = pl.Trainer(
-            max_epochs=self.config['model']['training']['num_epochs'],
-            accelerator=self.config['device']['accelerator'],
-            devices=self.config['device']['devices'],
-            strategy=self.config['device']['strategy'],
-            precision=self.config['device']['precision'],
-            callbacks=[checkpoint_callback, early_stopping],
-            logger=logger,
-            log_every_n_steps=50
-        )
-
-        return trainer, [checkpoint_callback, early_stopping]
-
-    @timer
-    def train(self, train_dataset: RecommendationDataset, valid_dataset: RecommendationDataset) -> Dict[str, float]:
+    @memory_optimize  # 现在可以使用这个装饰器了
+    def train(self):
         """训练模型"""
-        # 创建数据加载器
-        train_loader, valid_loader = self.create_dataloaders(train_dataset, valid_dataset)
+        try:
+            self.monitor_memory_usage()
+            
+            logger.info("Preparing training data...")
+            train_data, val_data = self.data_processor.prepare_train_val_data()
+            
+            self.monitor_memory_usage()
+            
+            train_loader, val_loader = self.create_dataloaders(train_data, val_data)
+            trainer = self.setup_training()
+            
+            logger.info("Starting model training...")
+            trainer.fit(self.model, train_loader, val_loader)
+            
+            self.monitor_memory_usage()
+            
+        except Exception as e:
+            logger.error(f"Error during training: {str(e)}")
+            raise
 
-        # 设置训练器
-        trainer, callbacks = self.setup_training()
-
-        # 训练模型
-        trainer.fit(
-            self.model,
-            train_loader,
-            valid_loader
-        )
-
-        # 获取最佳模型
-        best_model_path = callbacks[0].best_model_path
-        self.model = DeepRecommender.load_from_checkpoint(best_model_path)
-
-        # 返回最佳指标
-        return {
-            'best_val_loss': callbacks[0].best_model_score.item(),
-            'best_epoch': callbacks[0].best_epoch
-        }
-
-    def predict(self, test_dataset: RecommendationDataset) -> List[Tuple]:
-        """生成预测"""
-        test_loader = DataLoader(
-            test_dataset,
-            batch_size=self.config['model']['training']['batch_size'],
-            shuffle=False,
-            num_workers=self.config['data']['num_workers']
-        )
-
-        return self.model.generate_recommendations(test_loader)
-
-    @timer
-    def run_training(self) -> Dict[str, float]:
-        """运行完整训练流程"""
-        # 准备数据
-        user_data, item_data, encoders = self.prepare_data()
-
-        # 创建数据集
-        train_dataset, valid_dataset = self.create_datasets(
-            user_data,
-            self.config['training']['train_end_date'],
-            self.config['training']['pred_date']
-        )
-
-        # 训练模型
-        metrics = self.train(train_dataset, valid_dataset)
-
-        # 保存模型
-        self.save_model_artifacts()
-
-        return metrics
-
-    def save_model_artifacts(self):
-        """保存模型相关文件"""
+    def save_model(self):
+        """保存模型和配置"""
         output_dir = Path(self.config['data']['paths']['output_dir'])
         output_dir.mkdir(parents=True, exist_ok=True)
-
-        # 保存模型
-        self.model.save_model(output_dir / 'model.pt')
-
-        # 保存配置
-        with open(output_dir / 'config.yaml', 'w') as f:
+        
+        model_path = output_dir / 'model.pt'
+        torch.save(self.model.state_dict(), model_path)
+        
+        config_path = output_dir / 'config.yaml'
+        with open(config_path, 'w') as f:
             yaml.dump(self.config, f)
-
-        logger.info(f"Saved model artifacts to {output_dir}")
-
-    def generate_submission(self, test_date: str):
-        """生成提交文件"""
-        # 准备数据
-        user_data, item_data, encoders = self.prepare_data()
-
-        # 创建测试数据集
-        test_features = self.feature_engineer.generate_features(user_data, test_date)
-        test_dataset = RecommendationDataset(test_features, user_data, test_date, self.config)
-
-        # 生成预测
-        recommendations = self.predict(test_dataset)
-
-        # 转换ID并保存
-        submission = []
-        for user_encoded, item_encoded, _ in recommendations:
-            user_id = encoders['user_id'].inverse_transform([user_encoded])[0]
-            item_id = encoders['item_id'].inverse_transform([item_encoded])[0]
-            submission.append((str(user_id), str(item_id)))
-
-        # 保存提交文件
-        submission_df = pd.DataFrame(submission, columns=['user_id', 'item_id'])
-        output_path = Path(self.config['data']['paths']['output_dir']) / 'submission.csv'
-        submission_df.to_csv(output_path, index=False)
-
-        logger.info(f"Generated submission file with {len(submission_df)} recommendations")
+            
+        logger.info(f"Model and config saved to {output_dir}")
 
 if __name__ == "__main__":
-    # 运行训练流程
     trainer = ModelTrainer('config/config.yaml')
-    metrics = trainer.run_training()
-    trainer.generate_submission('2024-11-14')
+    trainer.train()

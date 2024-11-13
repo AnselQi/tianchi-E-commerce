@@ -1,85 +1,101 @@
 data:
-  raw_user_data: 'data/raw/tianchi_fresh_comp_train_user_2w.csv'
-  raw_item_data: 'data/raw/tianchi_fresh_comp_train_item_2w.csv'
-  processed_data_dir: 'data/processed'
-  output_dir: 'data/output'
+  paths:
+    raw_user_data: 'data/raw/tianchi_fresh_comp_train_user_2w.csv'
+    raw_item_data: 'data/raw/tianchi_fresh_comp_train_item_2w.csv'
+    processed_data_dir: 'data/processed'
+    output_dir: 'data/output'
+    checkpoint_dir: 'checkpoints'
+    log_dir: 'logs'
+  features:
+    categorical:
+      - user_id
+      - item_id
+      - category
+    numerical:
+      - behavior_count
+      - behavior_type
+      - category_count
+      - conversion_rate
+    sequence:
+      max_length: 50
+      padding: 'pre'
+      truncating: 'pre'
+      pad_value: 0
+    user:
+      categorical:
+        - user_id
+      numerical:
+        - hour
+        - day
+        - weekday
+    item:
+      categorical:
+        - item_id
+        - category
+      numerical: []
 
 features:
-  time_windows: [1, 3, 7, 14]  # 特征提取的时间窗口（天）
+  time_windows: [1, 3, 7, 14]
   behavuir_types: [1, 2, 3, 4]
-  chunk_size: 100000  # 分批处理大小
-  memory_optimize: true  # 是否启用内存优化
-  save_dir: 'data/processed/features'  # 特征存储目录
-  categorical_features:  # 分类特征
-    - user_id
-    - item_id
-    - category
-  numerical_features:  # 数值特征
-    - behavior_count
-    - category_count
-    - conversion_rate
-  user_features:  # 用户特征配置
+  chunk_size: 1000000
+  memory_optimize: true
+  save_dir: 'data/processed/features'
+  user_features:
     enable_behavior_count: true
     enable_category_preference: true
     enable_time_based: true
-  item_features:  # 商品特征配置
+  item_features:
     enable_behavior_count: true
     enable_user_stats: true
     enable_time_based: true
   processing:
-    batch_size: 100000  # 特征处理的批次大小
-    n_jobs: -1  # 并行处理的作业数，-1表示使用所有CPU核心
+    batch_size: 100000
+    n_jobs: -1
+
+device:
+  accelerator: 'gpu'
+  devices: [0]  # 修改为列表格式
+  strategy: 'auto'
+  precision: 16
 
 model:
-  type: 'lightgbm'
-  params:
-    divice: 'gpu'
-    objective: 'binary'
-    metric: 'auc'
-    boosting_type: 'gbdt'
-    num_leaves: 31
-    learning_rate: 0.05
-    feature_fraction: 0.9
-    bagging_fraction: 0.8
-    bagging_freq: 5
-    verbose: -1  # 减少不必要的输出
-    # 内存优化相关参数
-    max_bin: 255  # 减少内存使用
-    num_threads: 4  # 控制线程数
-    use_missing: true  # 优化处理缺失值
-    save_binary: true  # 保存二进制文件以加快加载速度
-    
+  training:
+    batch_size: 8192  # 修复了这里的格式
+    num_epochs: 10
+    early_stopping:
+      patience: 5
+      min_delta: 0.001
+    optimization:
+      accumulate_grad_batches: 1
+      gradient_clip_val: 1.0
+      precision: 16
+      cudnn_benchmark: true
+
 training:
-  train_start_date: '2014-11-18'
   train_end_date: '2014-12-18'
   pred_date: '2014-12-19'
   validation_days: 1
   top_k: 20
-  batch_size: 1024
-  num_epochs: 10
-  # 内存优化相关
   enable_memory_optimize: true
-  gc_collect_interval: 2  # 每处理多少批次触发一次垃圾回收
-  memory_limit_gb: 16  # 最大内存使用限制（GB）
-  save_checkpoints: true  # 是否保存检查点
-  checkpoint_interval: 5  # 每多少轮保存一次检查点
+  gc_collect_interval: 2
+  memory_limit_gb: 16
+  save_checkpoints: true
+  checkpoint_interval: 5
 
 logging:
   level: 'INFO'
   format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
   file: 'logs/recommender.log'
-  # 添加内存监控日志
   enable_memory_logging: true
-  memory_log_interval: 1000  # 每处理多少样本记录一次内存使用
-  log_feature_info: true  # 是否记录特征信息
+  memory_log_interval: 1000
+  log_feature_info: true
 
 system:
-  random_seed: 42  # 随机种子，保证结果可复现
-  num_workers: 4  # 数据加载的工作进程数
-  prefetch_factor: 2  # 预加载因子
-  pin_memory: true  # 是否将数据固定在内存中
+  num_workers: 16
+  pin_memory: true
+  prefetch_factor: 4
   memory_optimize:
     enable: true
-    min_memory_gb: 4  # 最小保留内存（GB）
-    max_memory_gb: 16  # 最大使用内存（GB）
-    cleaning_threshold_gb: 14  # 触发内存清理的阈值（GB）
+    min_memory_gb: 8
+    max_memory_gb: 70
+    cleaning_threshold_gb: 65

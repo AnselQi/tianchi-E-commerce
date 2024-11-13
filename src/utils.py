@@ -16,6 +16,17 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import pytorch_lightning as pl
 
+def timer(func):
+    """A decorator that prints how long a function took to run."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        result = func(*args, **kwargs)
+        end_time = time.time()
+        logging.info(f'{func.__name__} took {end_time - start_time:.2f} seconds to run')
+        return result
+    return wrapper
+
 def setup_logging(config: Dict):
     """设置日志配置"""
     # 创建日志目录
