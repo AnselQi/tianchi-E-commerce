@@ -1,14 +1,15 @@
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import LabelEncoder, StandardScaler
 import yaml
-from typing import Tuple, Dict, Union
+from typing import Tuple, Dict, Union, List
 import logging
 from src.utils import setup_logging
+import torch
+from torch.utils.data import random_split
 
 logger = logging.getLogger(__name__)
-
 
 class DataProcessor:
     """数据处理类"""
@@ -30,158 +31,190 @@ class DataProcessor:
 
         setup_logging(self.config['logging'])
 
-        # 更新编码器字典中的键名，使其与特征工程中的名称一致
+        # 编码器和标准化器
         self.encoders = {
             'user_id': LabelEncoder(),
             'item_id': LabelEncoder(),
-            'category': LabelEncoder()  # 改为 'category' 以匹配特征工程中的命名
+            'category': LabelEncoder(),
+            'user_geohash': LabelEncoder(),
+            'item_geohash': LabelEncoder()
+        }
+        
+        self.scalers = {
+            'numerical_features': StandardScaler()
         }
 
     def load_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """
-        加载原始数据
-        Returns:
-            用户数据和商品数据
-        """
+        """加载原始数据"""
         logger.info("Loading raw data...")
 
-        user_data = pd.read_csv(self.config['data']['raw_user_data'])
-        item_data = pd.read_csv(self.config['data']['raw_item_data'])
+        user_data = pd.read_csv(self.config['data']['paths']['raw_user_data'])
+        item_data = pd.read_csv(self.config['data']['paths']['raw_item_data'])
 
-        # 确保category列名一致
         if 'item_category' in user_data.columns:
             user_data = user_data.rename(columns={'item_category': 'category'})
         if 'item_category' in item_data.columns:
             item_data = item_data.rename(columns={'item_category': 'category'})
 
-        logger.info(
-            f"Loaded {len(user_data)} user records and {len(item_data)} item records")
+        logger.info(f"Loaded {len(user_data)} user records and {len(item_data)} item records")
         return user_data, item_data
 
     def preprocess_data(self, user_data: pd.DataFrame, item_data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """
-        数据预处理
-        Args:
-            user_data: 用户数据
-            item_data: 商品数据
-        Returns:
-            处理后的用户数据和商品数据
-        """
+        """数据预处理"""
         logger.info("Preprocessing data...")
 
         try:
             # 时间处理
             user_data['time'] = pd.to_datetime(user_data['time'])
-
-            # 确保category列存在
-            if 'category' not in user_data.columns:
-                raise ValueError("'category' column not found in user_data")
+            user_data['hour'] = user_data['time'].dt.hour
+            user_data['day'] = user_data['time'].dt.day
+            user_data['weekday'] = user_data['time'].dt.weekday
 
             # 编码分类特征
-            encoded_columns = {
-                'user_id': 'user_id_encoded',
-                'item_id': 'item_id_encoded',
-                'category': 'category_encoded'
-            }
-
-            for orig_col, enc_col in encoded_columns.items():
-                if orig_col in user_data.columns:
-                    user_data[enc_col] = self.encoders[orig_col].fit_transform(user_data[orig_col])
-                if orig_col in item_data.columns:
-                    if hasattr(self.encoders[orig_col], 'classes_'):
-                        item_data[enc_col] = self.encoders[orig_col].transform(item_data[orig_col])
+            categorical_features = self.config['data']['features']['categorical']
+            for feature in categorical_features:
+                if feature in user_data.columns:
+                    user_data[f'{feature}_encoded'] = self.encoders[feature].fit_transform(user_data[feature])
+                if feature in item_data.columns:
+                    if hasattr(self.encoders[feature], 'classes_'):
+                        item_data[f'{feature}_encoded'] = self.encoders[feature].transform(item_data[feature])
                     else:
-                        item_data[enc_col] = self.encoders[orig_col].fit_transform(item_data[orig_col])
+                        item_data[f'{feature}_encoded'] = self.encoders[feature].fit_transform(item_data[feature])
 
             # 处理缺失值
             user_data['user_geohash'] = user_data['user_geohash'].fillna('unknown')
             item_data['item_geohash'] = item_data['item_geohash'].fillna('unknown')
 
-            # 验证必要的列是否存在
-            required_columns = ['category_encoded', 'user_id_encoded', 'item_id_encoded']
-            missing_columns = [col for col in required_columns if col not in user_data.columns]
-            if missing_columns:
-                raise ValueError(f"Missing required columns after preprocessing: {missing_columns}")
+            # 生成序列特征
+            user_data = self.generate_sequence_features(user_data)
+
+            # 标准化数值特征
+            numerical_features = ['hour', 'day', 'weekday']
+            user_data[numerical_features] = self.scalers['numerical_features'].fit_transform(user_data[numerical_features])
 
             logger.info("Data preprocessing completed")
-            logger.info(f"Available columns in user_data: {user_data.columns.tolist()}")
             return user_data, item_data
 
         except Exception as e:
             logger.error(f"Error during preprocessing: {str(e)}")
             raise
 
-    def process_all(self) -> Tuple[pd.DataFrame, pd.DataFrame, Dict]:
-        """
-        完整的数据处理流程
-        Returns:
-            处理后的用户数据、商品数据和编码器
-        """
-        logger.info("Starting complete data processing...")
+    def generate_sequence_features(self, user_data: pd.DataFrame) -> pd.DataFrame:
+        """生成序列特征"""
+        max_seq_length = self.config['data']['features']['sequence']['max_length']
+        
+        # 按用户和时间排序
+        user_data = user_data.sort_values(['user_id', 'time'])
+        
+        # 生成行为序列
+        sequences = user_data.groupby('user_id').agg({
+            'item_id_encoded': lambda x: list(x)[-max_seq_length:],
+            'behavior_type': lambda x: list(x)[-max_seq_length:],
+            'time': lambda x: list(x)[-max_seq_length:]
+        }).reset_index()
+        
+        # 填充序列
+        sequences['sequence_length'] = sequences['item_id_encoded'].apply(len)
+        sequences['item_sequence'] = sequences['item_id_encoded'].apply(
+            lambda x: x + [0] * (max_seq_length - len(x)))
+        sequences['behavior_sequence'] = sequences['behavior_type'].apply(
+            lambda x: x + [0] * (max_seq_length - len(x)))
+        
+        return pd.merge(user_data, sequences[['user_id', 'item_sequence', 'behavior_sequence', 'sequence_length']], 
+                       on='user_id', how='left')
+
+    def prepare_train_val_data(self) -> Tuple[Dict, Dict]:
+        """准备训练和验证数据"""
         user_data, item_data = self.load_data()
         processed_user_data, processed_item_data = self.preprocess_data(user_data, item_data)
-        self.save_processed_data(processed_user_data, processed_item_data)
-        return processed_user_data, processed_item_data, self.encoders
+        
+        # 分割训练和验证数据
+        train_end_date = pd.to_datetime(self.config['training']['train_end_date'])
+        val_date = pd.to_datetime(self.config['training']['pred_date'])
+        
+        train_data = processed_user_data[processed_user_data['time'] <= train_end_date]
+        val_data = processed_user_data[processed_user_data['time'].dt.date == val_date.date()]
+        
+        # 创建特征字典
+        train_features = self.create_feature_dict(train_data, processed_item_data)
+        val_features = self.create_feature_dict(val_data, processed_item_data)
+        
+        return train_features, val_features
 
-    def save_processed_data(self, user_data: pd.DataFrame, item_data: pd.DataFrame):
-        """
-        保存处理后的数据
-        Args:
-            user_data: 处理后的用户数据
-            item_data: 处理后的商品数据
-        """
-        try:
-            processed_dir = Path(self.config['data']['processed_data_dir'])
-            processed_dir.mkdir(parents=True, exist_ok=True)
+    def create_feature_dict(self, user_data: pd.DataFrame, item_data: pd.DataFrame) -> Dict:
+        """创建特征字典"""
+        return {
+            'user_features': {
+                'categorical': {
+                    feat: torch.tensor(user_data[f'{feat}_encoded'].values)
+                    for feat in self.config['data']['features']['user']['categorical']
+                },
+                'numerical': torch.tensor(
+                    user_data[self.config['data']['features']['user']['numerical']].values
+                )
+            },
+            'item_features': {
+                'categorical': {
+                    feat: torch.tensor(item_data[f'{feat}_encoded'].values)
+                    for feat in self.config['data']['features']['item']['categorical']
+                },
+                'numerical': torch.tensor(
+                    item_data[self.config['data']['features']['item']['numerical']].values
+                )
+            },
+            'sequence_features': {
+                'items': torch.tensor(user_data['item_sequence'].tolist()),
+                'behaviors': torch.tensor(user_data['behavior_sequence'].tolist()),
+                'lengths': torch.tensor(user_data['sequence_length'].values)
+            },
+            'labels': torch.tensor(
+                (user_data['behavior_type'] == 4).astype(float).values
+            )
+        }
 
-            user_data.to_pickle(processed_dir / 'processed_user_data.pkl')
-            item_data.to_pickle(processed_dir / 'processed_item_data.pkl')
-
-            # 保存编码器
-            np.save(processed_dir / 'encoders.npy', self.encoders)
-
-            logger.info(f"Saved processed data to {processed_dir}")
-        except Exception as e:
-            logger.error(f"Error saving processed data: {str(e)}")
-            raise
-
-    def load_processed_data(self) -> Tuple[pd.DataFrame, pd.DataFrame, Dict]:
-        """
-        加载处理后的数据，如果数据无效则重新处理
-        Returns:
-            处理后的用户数据、商品数据和编码器
-        """
-        try:
-            processed_dir = Path(self.config['data']['processed_data_dir'])
+    def prepare_test_data(self, test_date: str = None) -> Dict:
+        """准备测试数据"""
+        if test_date is None:
+            test_date = self.config['training']['pred_date']
             
-            # 检查所有必要的文件是否存在
-            required_files = ['processed_user_data.pkl', 'processed_item_data.pkl', 'encoders.npy']
-            if not all((processed_dir / file).exists() for file in required_files):
-                logger.info("Some processed files missing, starting reprocessing...")
-                return self.process_all()
+        user_data, item_data = self.load_data()
+        processed_user_data, processed_item_data = self.preprocess_data(user_data, item_data)
+        
+        test_data = processed_user_data[
+            processed_user_data['time'].dt.date == pd.to_datetime(test_date).date()
+        ]
+        
+        return self.create_feature_dict(test_data, processed_item_data)
 
-            # 尝试加载数据
-            user_data = pd.read_pickle(processed_dir / 'processed_user_data.pkl')
-            item_data = pd.read_pickle(processed_dir / 'processed_item_data.pkl')
-            encoders = np.load(processed_dir / 'encoders.npy', allow_pickle=True).item()
+    def calculate_sequence_stats(self, user_data: pd.DataFrame) -> Dict:
+        """计算序列统计信息"""
+        sequence_lengths = user_data.groupby('user_id').size()
+        return {
+            'avg_length': sequence_lengths.mean(),
+            'max_length': sequence_lengths.max(),
+            'min_length': sequence_lengths.min()
+        }
 
-            # 验证必要的列是否存在
-            required_columns = ['category_encoded', 'user_id_encoded', 'item_id_encoded']
-            if not all(col in user_data.columns for col in required_columns):
-                logger.info("Processed data missing required columns, starting reprocessing...")
-                return self.process_all()
-
-            logger.info("Successfully loaded processed data")
-            return user_data, item_data, encoders
-
-        except Exception as e:
-            logger.warning(f"Error loading processed data: {str(e)}. Starting reprocessing...")
-            return self.process_all()
-
+    def create_submission(self, predictions: np.ndarray, test_data: Dict) -> pd.DataFrame:
+        """创建提交文件"""
+        user_ids = self.encoders['user_id'].inverse_transform(test_data['user_features']['categorical']['user_id'])
+        item_ids = self.encoders['item_id'].inverse_transform(test_data['item_features']['categorical']['item_id'])
+        
+        submission = pd.DataFrame({
+            'user_id': user_ids,
+            'item_id': item_ids,
+            'score': predictions
+        })
+        
+        # 筛选top-k推荐
+        top_k = self.config['training']['top_k']
+        submission = submission.groupby('user_id').apply(
+            lambda x: x.nlargest(top_k, 'score')
+        ).reset_index(drop=True)
+        
+        return submission[['user_id', 'item_id']]
 
 if __name__ == "__main__":
-    # 测试数据处理
     processor = DataProcessor('config/config.yaml')
-    
-    # 直接调用load_processed_data，它会在需要时自动重新处理数据
-    user_data, item_data, encoders = processor.load_processed_data()
+    train_features, val_features = processor.prepare_train_val_data()
+    logger.info("Data preparation completed successfully")
